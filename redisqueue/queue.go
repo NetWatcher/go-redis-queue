@@ -6,7 +6,10 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"strconv"
 	"time"
+	"io"
 )
+
+var ErrClosed = fmt.Errorf("use of closed queue")
 
 // Queue holds a reference to a redis connection and a queue name.
 type Queue struct {
@@ -15,6 +18,7 @@ type Queue struct {
 	readBuf bytes.Buffer
 	usePool bool
 	Name    string
+	closed  bool
 }
 
 // New defines a new Queue with redis.Pool or single redis.Conn
@@ -49,8 +53,19 @@ func (q *Queue) Write(p []byte) (n int, err error) {
 	return
 }
 
+func (q *Queue) Close () error {
+	q.closed = true
+
+	return q.FlushQueue()
+}
+
 // Implements io.Reader
 func (q *Queue) Read(p []byte) (n int, err error) {
+
+	if q.closed {
+		return 0, ErrClosed
+	}
+
 	var available int64
 	available, err = q.Pending()
 	if err != nil {
@@ -68,7 +83,12 @@ func (q *Queue) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	return q.readBuf.Read(p)
+	n, err = q.readBuf.Read(p)
+	if err != nil && err == io.EOF {
+		err = nil
+	}
+
+	return
 }
 
 // Push pushes a single job on to the queue. The job string can be any format, as the queue doesn't really care.
@@ -78,6 +98,10 @@ func (q *Queue) Push(job string) (bool, error) {
 
 // Schedule schedule a job at some point in the future, or some point in the past. Scheduling a job far in the past is the same as giving it a high priority, as jobs are popped in order of due date.
 func (q *Queue) Schedule(job string, when time.Time) (bool, error) {
+	if q.closed {
+		return false, ErrClosed
+	}
+
 	var c redis.Conn
 	if q.usePool {
 		c = q.pool.Get()
